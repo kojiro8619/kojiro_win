@@ -1,0 +1,1 @@
+I would like to use DropBox to upload and download CSV files. I have created an app called CSVFileApp in DropBox and have set the scope. I am writing code that allows operations by obtaining an access token offline and then a refresh token, but I am getting an error. I would appreciate any advice from someone with experience.

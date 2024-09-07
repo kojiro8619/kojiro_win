@@ -1,0 +1,251 @@
+using Dropbox.Api;
+using Dropbox.Api.Files;
+using Microsoft.Maui.Controls;
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using Newtonsoft.Json;
+
+namespace DropBoxCSVDownLoder
+{
+    public partial class MainPage : ContentPage
+    {
+        private static readonly string ApiKey = "oujoi1gltgyjpy4"; // DropboxアプリのAPIキー
+        private static readonly string ApiSecret = "v06mmgknj5bqts2"; // DropboxアプリのAPIシークレット
+        private static readonly string RedirectUri = "http://localhost:5000"; // リダイレクトURI
+
+        private DropboxClient? client; // null 許容型として宣言
+        private string? accessToken; // null 許容型として宣言
+        private string? refreshToken; // リフレッシュトークンを追加
+        private static readonly HttpClient httpClient = new HttpClient(); // HttpClient を再利用
+
+        public MainPage()
+        {
+            InitializeComponent();
+            Debug.WriteLine("MainPage constructor called.");
+            _ = InitializeAsync();
+        }
+
+        private async Task InitializeAsync()
+        {
+            Debug.WriteLine("InitializeAsync called.");
+
+            try
+            {
+                // PKCEフローでアクセストークンとリフレッシュトークンを取得
+                await AuthenticateAsync();
+
+                // アクセストークンをデバッグ出力
+                Debug.WriteLine($"Access Token: {accessToken}");
+
+                // DropboxClientの初期化
+                if (!string.IsNullOrEmpty(accessToken))
+                {
+                    client = new DropboxClient(accessToken);
+                }
+
+                // ファイルのパス設定
+                string localFilePath = @"C:\Users\kojir\Desktop\android data output\test.csv";
+                string dropboxFilePath = "/Apps/CSVFileApp/test.csv";
+
+                // Dropbox にファイルをアップロード
+                if (client != null) // null チェックを追加
+                {
+                    await UploadFileToDropboxAsync(localFilePath, dropboxFilePath);
+                    Debug.WriteLine($"File uploaded to Dropbox: {dropboxFilePath}");
+                }
+                else
+                {
+                    Debug.WriteLine("Dropbox client is not initialized.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error during initialization: {ex.Message}");
+            }
+        }
+
+        private async Task AuthenticateAsync()
+        {
+            var oauth2State = Guid.NewGuid().ToString("N");
+            var authorizeUri = $"https://www.dropbox.com/oauth2/authorize?client_id={ApiKey}&response_type=code&token_access_type=offline&state={oauth2State}&redirect_uri={RedirectUri}";
+
+            Debug.WriteLine($"Navigate to: {authorizeUri}");
+
+            // 認証用URLをブラウザで開く
+            OpenBrowser(authorizeUri);
+
+            // 認証コードを取得
+            var authorizationCode = await ListenForAuthorizationCodeAsync();
+
+            // トークンを取得
+            await ExchangeCodeForTokenAsync(authorizationCode);
+
+            Debug.WriteLine($"Access Token: {accessToken}");
+            Debug.WriteLine($"Refresh Token: {refreshToken}");
+        }
+
+        private async Task<string> ListenForAuthorizationCodeAsync()
+        {
+            var listener = new System.Net.HttpListener();
+            listener.Prefixes.Add(RedirectUri + "/");
+            listener.Start();
+
+            Debug.WriteLine("Listening for authorization code...");
+            var context = await listener.GetContextAsync();
+            var response = context.Response;
+            var request = context.Request;
+
+            string authorizationCode = string.Empty;
+            if (request.Url != null)
+            {
+                var query = request.Url.Query;
+                var parameters = System.Web.HttpUtility.ParseQueryString(query);
+                authorizationCode = parameters["code"] ?? string.Empty; // null チェックを追加
+
+                if (string.IsNullOrEmpty(authorizationCode))
+                {
+                    Debug.WriteLine("Authorization code is missing.");
+                }
+                else
+                {
+                    Debug.WriteLine($"Authorization Code: {authorizationCode}");
+                }
+            }
+            else
+            {
+                Debug.WriteLine("Request URL is null.");
+            }
+
+            // レスポンスを送信
+            string responseString = "<html><body>Authorization code received. You can close this window.</body></html>";
+            var buffer = System.Text.Encoding.UTF8.GetBytes(responseString);
+            response.ContentLength64 = buffer.Length;
+            var output = response.OutputStream;
+            await output.WriteAsync(buffer, 0, buffer.Length);
+            output.Close();
+
+            listener.Stop();
+            return authorizationCode;
+        }
+
+        private async Task ExchangeCodeForTokenAsync(string authorizationCode)
+        {
+            var tokenRequestUrl = "https://api.dropboxapi.com/oauth2/token";
+            var requestBody = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("code", authorizationCode),
+                new KeyValuePair<string, string>("grant_type", "authorization_code"),
+                new KeyValuePair<string, string>("client_id", ApiKey),
+                new KeyValuePair<string, string>("client_secret", ApiSecret),
+                new KeyValuePair<string, string>("redirect_uri", RedirectUri),
+            });
+
+            var response = await httpClient.PostAsync(tokenRequestUrl, requestBody);
+            var responseString = await response.Content.ReadAsStringAsync();
+
+            Debug.WriteLine($"Token response: {responseString}");
+
+            var tokenResponse = JsonConvert.DeserializeObject<OAuth2TokenResponse>(responseString);
+            accessToken = tokenResponse?.AccessToken; // アクセストークンをフィールドに保存
+            refreshToken = tokenResponse?.RefreshToken;
+
+            // デバッグ出力
+            Debug.WriteLine($"Access Token: {accessToken}");
+            Debug.WriteLine($"Refresh Token: {refreshToken}");
+
+            if (accessToken != null)
+            {
+                client = new DropboxClient(accessToken);
+            }
+        }
+
+        private async Task UploadFileToDropboxAsync(string localFilePath, string dropboxFilePath)
+        {
+            try
+            {
+                if (client == null)
+                {
+                    Debug.WriteLine("Dropbox client is not initialized.");
+                    return;
+                }
+
+                using (var fileStream = new FileStream(localFilePath, FileMode.Open, FileAccess.Read))
+                {
+                    // Dropboxにファイルをアップロード
+                    var updated = await client.Files.UploadAsync(
+                        dropboxFilePath,
+                        WriteMode.Overwrite.Instance,
+                        body: fileStream);
+
+                    Debug.WriteLine($"File uploaded successfully. Path: {updated.PathDisplay}");
+                }
+            }
+            catch (Dropbox.Api.BadInputException ex)
+            {
+                Debug.WriteLine($"Error uploading file: {ex.Message}");
+                // 追加のエラーメッセージがあればここで出力
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error uploading file: {ex.Message}");
+            }
+        }
+
+        private async void OpenBrowser(string url)
+        {
+            try
+            {
+                await Launcher.OpenAsync(url);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to open browser: {ex.Message}");
+            }
+        }
+
+        private async Task RefreshAccessTokenAsync()
+        {
+            if (string.IsNullOrEmpty(refreshToken))
+            {
+                Debug.WriteLine("Refresh token is missing.");
+                return;
+            }
+
+            var tokenRequestUrl = "https://api.dropboxapi.com/oauth2/token";
+            var requestBody = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("grant_type", "refresh_token"),
+                new KeyValuePair<string, string>("refresh_token", refreshToken),
+                new KeyValuePair<string, string>("client_id", ApiKey),
+                new KeyValuePair<string, string>("client_secret", ApiSecret),
+            });
+
+            var response = await httpClient.PostAsync(tokenRequestUrl, requestBody);
+            var responseString = await response.Content.ReadAsStringAsync();
+
+            Debug.WriteLine($"Token refresh response: {responseString}");
+
+            var tokenResponse = JsonConvert.DeserializeObject<OAuth2TokenResponse>(responseString);
+            accessToken = tokenResponse?.AccessToken;
+
+            if (accessToken != null)
+            {
+                client = new DropboxClient(accessToken);
+            }
+        }
+    }
+
+    public class OAuth2TokenResponse
+    {
+        public string AccessToken { get; set; } = string.Empty;
+        public int ExpiresIn { get; set; }
+        public string TokenType { get; set; } = string.Empty;
+        public string Scope { get; set; } = string.Empty;
+        public string RefreshToken { get; set; } = string.Empty;
+        public string AccountId { get; set; } = string.Empty;
+    }
+}
